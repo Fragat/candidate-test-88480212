@@ -1,7 +1,7 @@
 """API tests for the billing run and invoice endpoints.
 
 Covers: validation, response shapes,
-emails end-to-end, error mapping (409) and authorization.
+emails end-to-end and authorization.
 """
 import datetime
 from types import SimpleNamespace
@@ -163,29 +163,25 @@ def test_smtp_failure_after_commit_still_returns_201_and_records_failure(
     assert 'ConnectionRefusedError' in failed.last_error
 
 
-# --- POST /api/billing/runs/: conflict -------------------------------------
+# --- POST /api/billing/runs/: entries edited after billing ------------------
 
-def test_run_returns_409_and_writes_nothing_when_a_billed_entry_was_moved_into_the_month(
-    admin_client, active_contract, make_entry, django_capture_on_commit_callbacks,
-):
+def test_run_skips_an_entry_already_billed_in_another_month(admin_client, active_contract, make_entry):
     """Known issue: billed entries can still be edited. One moved into a later
-    month is picked up again and hits the one-invoice-line-per-entry
-    constraint; the whole run rolls back."""
-    entry = make_entry(active_contract, '2026-03-02')
+    month stays on its original invoice and is not billed again."""
+    moved = make_entry(active_contract, '2026-03-02')
     march = admin_client.post(RUNS_URL, {'month': '2026-03'}, format='json')
     assert march.status_code == 201
-    moved = admin_client.patch(f'/api/timesheets/{entry.pk}/', {'date': '2026-04-02'}, format='json')
-    assert moved.status_code == 200
+    resp = admin_client.patch(f'/api/timesheets/{moved.pk}/', {'date': '2026-04-02'}, format='json')
+    assert resp.status_code == 200
+    new = make_entry(active_contract, '2026-04-03')
 
-    with django_capture_on_commit_callbacks(execute=True) as callbacks:
-        resp = admin_client.post(RUNS_URL, {'month': '2026-04'}, format='json')
+    resp = admin_client.post(RUNS_URL, {'month': '2026-04'}, format='json')
 
-    assert resp.status_code == 409
-    assert 'already on another invoice' in resp.json()['detail']
-    # Rolled back as a whole: no April run or invoice, no email queued.
-    assert list(BillingRun.objects.values_list('pk', flat=True)) == [march.json()['run_id']]
-    assert list(Invoice.objects.values_list('period', flat=True)) == [MARCH]
-    assert callbacks == []
+    assert resp.status_code == 201
+    assert resp.json()['invoices_generated'] == 1
+    april = Invoice.objects.get(period=datetime.date(2026, 4, 1))
+    assert [line.timesheet_entry_id for line in april.lines.all()] == [new.pk]
+    assert moved.invoice_line.invoice.period == MARCH
 
 
 # --- Authorization ----------------------------------------------------------

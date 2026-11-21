@@ -1,6 +1,3 @@
-import logging
-
-from django.db import IntegrityError
 from django.db.models import QuerySet
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
@@ -20,14 +17,6 @@ from billing.serializers import (
 )
 from billing.services import run_billing
 
-logger = logging.getLogger(__name__)
-
-RUN_CONFLICT_DETAIL = (
-    'This month could not be billed because one or more of its timesheet entries '
-    'are already on another invoice, which can happen if an entry was edited after '
-    'it was billed. No changes were made.'
-)
-
 
 class BillingRunView(APIView):
     permission_classes = [IsAuthenticated, IsCompanyAdmin]
@@ -37,16 +26,9 @@ class BillingRunView(APIView):
         body.is_valid(raise_exception=True)
         period = body.validated_data['month']
 
-        company = request.user.company_admin.company
-
-        try:
-            run = run_billing(company=company, triggered_by=request.user, period=period)
-        except IntegrityError:
-            # This should only really happen when things have been moved intentionally. E.g. Updating a time sheet entry
-            # after it has already been invoiced. This is a stopgap for now.
-            logger.exception('Billing run for company %s %s hit a database constraint', company.pk, f'{period:%Y-%m}')
-            return Response({'detail': RUN_CONFLICT_DETAIL}, status=status.HTTP_409_CONFLICT)
-
+        run = run_billing(
+            company=request.user.company_admin.company, triggered_by=request.user, period=period
+        )
         return Response(BillingRunSerializer(run).data, status=status.HTTP_201_CREATED)
 
 

@@ -35,10 +35,10 @@ def run_billing(*, company: Company, triggered_by: User, period: datetime.date) 
     """Create one invoice per freelancer with approved entries in `period`.
 
     Idempotent per (company, freelancer, period): freelancers that already have
-    an invoice for the period are counted as existing and left untouched.
+    an invoice for the period are counted as existing and not touched.
 
-    Raises IntegrityError, rolling back the whole run, if a selected entry is
-    already on an invoice.
+    Entries already on an invoice are never billed again, even if they have
+    since been edited into this period.
     """
     with transaction.atomic():
         # Ensure multiple triggers do not try and race each other. Successive attempts wait.
@@ -54,6 +54,7 @@ def run_billing(*, company: Company, triggered_by: User, period: datetime.date) 
                 date__month=period.month,
                 contract__company=company,
                 hours__gt=0,  # Skip 0 hours to avoid empty lines.
+                invoice_line__isnull=True,  # Each entry is billed at most once.
             )
             .select_related('contract__freelancer__user')
             .order_by('contract__freelancer_id', 'date', 'id')
@@ -67,12 +68,12 @@ def run_billing(*, company: Company, triggered_by: User, period: datetime.date) 
         new_invoice_ids = []
         for freelancer_id, group in groupby(entries, key=attrgetter('contract.freelancer_id')):
             if freelancer_id in already_invoiced:
-                run.invoices_existing += 1
-                continue
+                continue  # Late approvals for an invoiced freelancer are left unbilled.
             invoice = _issue_invoice(run=run, company=company, period=period, entries=list(group))
             new_invoice_ids.append(invoice.pk)
 
         run.invoices_generated = len(new_invoice_ids)
+        run.invoices_existing = len(already_invoiced)
         run.save(update_fields=['invoices_generated', 'invoices_existing'])
 
         if new_invoice_ids:
