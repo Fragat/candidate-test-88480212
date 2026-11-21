@@ -42,10 +42,7 @@ def run_billing(*, company: Company, triggered_by: User, period: datetime.date) 
     """
     with transaction.atomic():
         # Ensure multiple triggers do not try and race each other. Successive attempts wait.
-        Company.objects.select_for_update().get(pk=company.pk)
-        company.refresh_from_db()
-
-        run = BillingRun.objects.create(company=company, period=period, triggered_by=triggered_by)
+        company = Company.objects.select_for_update().get(pk=company.pk)
 
         entries = (
             TimesheetEntry.objects.filter(
@@ -65,16 +62,23 @@ def run_billing(*, company: Company, triggered_by: User, period: datetime.date) 
             )
         )
 
-        new_invoice_ids = []
-        for freelancer_id, group in groupby(entries, key=attrgetter('contract.freelancer_id')):
-            if freelancer_id in already_invoiced:
-                continue  # Late approvals for an invoiced freelancer are left unbilled.
-            invoice = _issue_invoice(run=run, company=company, period=period, entries=list(group))
-            new_invoice_ids.append(invoice.pk)
+        to_issue = [
+            list(group)
+            for freelancer_id, group in groupby(entries, key=attrgetter('contract.freelancer_id'))
+            if freelancer_id not in already_invoiced  # Late approvals for an invoiced freelancer are left unbilled.
+        ]
 
-        run.invoices_generated = len(new_invoice_ids)
-        run.invoices_existing = len(already_invoiced)
-        run.save(update_fields=['invoices_generated', 'invoices_existing'])
+        run = BillingRun.objects.create(
+            company=company,
+            period=period,
+            triggered_by=triggered_by,
+            invoices_generated=len(to_issue),
+            invoices_existing=len(already_invoiced),
+        )
+        new_invoice_ids = [
+            _issue_invoice(run=run, company=company, period=period, entries=freelancer_entries).pk
+            for freelancer_entries in to_issue
+        ]
 
         if new_invoice_ids:
             # Never send email inside the transaction. robust=True: a failure
