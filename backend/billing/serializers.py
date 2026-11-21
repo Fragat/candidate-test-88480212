@@ -1,10 +1,10 @@
 import datetime
 import re
-from collections.abc import Iterable
 
 from django.utils import timezone
 from rest_framework import serializers
 
+from billing.delivery import aggregate_delivery_status
 from billing.models import BillingRun, Invoice, InvoiceDelivery, InvoiceLine
 
 CURRENCY = 'GBP'
@@ -49,20 +49,6 @@ class InvoiceListQuerySerializer(serializers.Serializer):
     """Query parameters for GET /api/invoices/."""
 
     month = MonthField(required=False)
-
-
-def aggregate_delivery_status(deliveries: Iterable[InvoiceDelivery]) -> str:
-    """One status for an invoice's deliveries.
-
-    'failed' if any delivery failed, 'sent' once every delivery has been sent,
-    otherwise 'pending' (which includes rows currently being sent).
-    """
-    statuses = {delivery.status for delivery in deliveries}
-    if InvoiceDelivery.STATUS_FAILED in statuses:
-        return InvoiceDelivery.STATUS_FAILED
-    if statuses == {InvoiceDelivery.STATUS_SENT}:
-        return InvoiceDelivery.STATUS_SENT
-    return InvoiceDelivery.STATUS_PENDING
 
 
 class BillingRunSerializer(serializers.ModelSerializer):

@@ -4,9 +4,9 @@ from rest_framework.views import APIView
 
 
 class IsCompanyAdmin(BasePermission):
-    """Billing is a company-admin-only area, checks that the user is an admin"""
+    """The user is a company admin. Scoping to their company is up to the view."""
 
-    message = 'Only company admins can access billing.'
+    message = 'Only company admins can do this.'
 
     def has_permission(self, request: Request, view: APIView) -> bool:
         return hasattr(request.user, 'company_admin')

@@ -7,6 +7,7 @@ Delivery is at-least-once. If we fail to save that sending completed, it will re
 """
 import datetime
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -24,6 +25,20 @@ STALE_SENDING_AFTER = datetime.timedelta(minutes=10)
 
 MISSING_EMAIL_ERROR = 'No email address on record for this recipient.'
 ABANDONED_ERROR = 'Delivery attempt never completed (sender stopped mid-send); attempts exhausted.'
+
+
+def aggregate_delivery_status(deliveries: Iterable[InvoiceDelivery]) -> str:
+    """One status for an invoice's deliveries.
+
+    'failed' if any delivery failed, 'sent' once every delivery has been sent,
+    otherwise 'pending' (which includes rows currently being sent).
+    """
+    statuses = {delivery.status for delivery in deliveries}
+    if InvoiceDelivery.STATUS_FAILED in statuses:
+        return InvoiceDelivery.STATUS_FAILED
+    if statuses == {InvoiceDelivery.STATUS_SENT}:
+        return InvoiceDelivery.STATUS_SENT
+    return InvoiceDelivery.STATUS_PENDING
 
 
 def new_delivery(*, invoice: Invoice, recipient_type: str, email: str) -> InvoiceDelivery:

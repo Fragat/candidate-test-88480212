@@ -6,8 +6,8 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.permissions import IsCompanyAdmin
 from billing.models import Invoice
-from billing.permissions import IsCompanyAdmin
 from billing.serializers import (
     BillingRunRequestSerializer,
     BillingRunSerializer,

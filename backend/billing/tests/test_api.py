@@ -16,7 +16,7 @@ from rest_framework.authtoken.models import Token
 
 from accounts.models import CompanyAdmin, Freelancer
 from billing.models import BillingRun, Invoice, InvoiceDelivery
-from billing.serializers import aggregate_delivery_status
+from billing.delivery import aggregate_delivery_status
 from billing.services import run_billing
 
 from .conftest import MARCH
@@ -206,7 +206,7 @@ def test_non_admin_is_forbidden(request, client_fixture, method, url):
     resp = getattr(client, method)(url, {'month': '2026-03'}, format='json')
 
     assert resp.status_code == 403
-    assert resp.json()['detail'] == 'Only company admins can access billing.'
+    assert resp.json()['detail'] == 'Only company admins can do this.'
     assert BillingRun.objects.count() == 0
 
 
