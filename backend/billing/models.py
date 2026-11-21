@@ -9,8 +9,9 @@ which will then get used for sending emails.
 InvoiceLines are used to link up to specific timesheet entries for traceability and
 to ensure we don't bill multiple times. Defined here rather than on the timesheet for domain separation.
 
-InvoiceDelivery created synchronously but then processed async to handle slower/unreliable emails, PDF generation etc.
-One for company and one for freelancer.
+InvoiceDelivery created synchronously and one delivery attempt is made.
+Any retries are processed async to handle unreliable emails.
+One email for company and one for freelancer.
 """
 import datetime
 

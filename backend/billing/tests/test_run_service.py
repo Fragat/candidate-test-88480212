@@ -426,7 +426,7 @@ def test_concurrent_runs_for_the_same_month_issue_one_set_of_invoices(
             connection.close()
 
     # Not testing email here: stop the post-commit hook from sending.
-    with mock.patch('billing.services.deliver_invoices'):
+    with mock.patch('billing.services.send_deliveries'):
         threads = [threading.Thread(target=run) for _ in range(2)]
         for t in threads:
             t.start()

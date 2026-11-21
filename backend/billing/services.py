@@ -21,7 +21,7 @@ from django.utils import timezone
 from accounts.models import Company
 from contracts.models import TimesheetEntry
 
-from .delivery import deliver_invoices
+from .delivery import new_delivery, send_deliveries
 from .models import BillingRun, Invoice, InvoiceDelivery, InvoiceLine
 
 logger = logging.getLogger(__name__)
@@ -118,10 +118,10 @@ def run_billing(*, company: Company, triggered_by: User, period: datetime.date) 
         if new_invoice_ids:
             # Never send email inside the transaction. robust=True: a failure
             # in the post-commit send must not turn a committed run into a 500.
-            def send_new_invoices() -> None:
-                deliver_invoices(new_invoice_ids)
-
-            transaction.on_commit(send_new_invoices, robust=True)
+            transaction.on_commit(
+                lambda: send_deliveries(InvoiceDelivery.objects.filter(invoice_id__in=new_invoice_ids)),
+                robust=True,
+            )
 
     logger.info(
         'Billing run %s for company %s %s: %s generated, %s existing',
@@ -162,12 +162,12 @@ def _issue_invoice(
         line.invoice = invoice
     InvoiceLine.objects.bulk_create(lines)
     InvoiceDelivery.objects.bulk_create([
-        InvoiceDelivery(
+        new_delivery(
             invoice=invoice,
             recipient_type=InvoiceDelivery.RECIPIENT_COMPANY,
             email=company.billing_email,
         ),
-        InvoiceDelivery(
+        new_delivery(
             invoice=invoice,
             recipient_type=InvoiceDelivery.RECIPIENT_FREELANCER,
             email=freelancer.user.email,

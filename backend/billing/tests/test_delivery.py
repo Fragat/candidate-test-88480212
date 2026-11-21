@@ -18,7 +18,7 @@ from billing.delivery import (
     MISSING_EMAIL_ERROR,
     STALE_SENDING_AFTER,
     attempt_delivery,
-    deliver_invoices,
+    send_deliveries,
 )
 from billing.models import Invoice, InvoiceDelivery
 from billing.services import run_billing
@@ -64,6 +64,11 @@ def freelancer_delivery(invoice):
     return delivery(invoice, InvoiceDelivery.RECIPIENT_FREELANCER)
 
 
+def send_for(*invoices):
+    """What the billing run does after commit for the invoices it issued."""
+    return send_deliveries(InvoiceDelivery.objects.filter(invoice__in=invoices))
+
+
 def run_command():
     out = StringIO()
     call_command('send_invoice_emails', stdout=out)
@@ -100,8 +105,8 @@ def test_billing_run_leaves_two_pending_deliveries(invoice, mailoutbox):
     assert mailoutbox == []
 
 
-def test_deliver_invoices_sends_one_email_per_recipient(invoice, mailoutbox):
-    deliver_invoices([invoice.pk])
+def test_post_run_send_sends_one_email_per_recipient(invoice, mailoutbox):
+    send_for(invoice)
 
     assert sorted(m.to for m in mailoutbox) == [[COMPANY_EMAIL], [FREELANCER_EMAIL]]
     for message in mailoutbox:
@@ -129,7 +134,7 @@ def test_send_failure_is_recorded_and_invoice_untouched(invoice, mailoutbox, exc
     before = Invoice.objects.filter(pk=invoice.pk).values().get()
 
     with send_raising(exc):
-        deliver_invoices([invoice.pk])  # must not raise
+        send_for(invoice)  # must not raise
 
     failed = company_delivery(invoice)  # attempted first
     assert failed.status == InvoiceDelivery.STATUS_FAILED
@@ -143,19 +148,27 @@ def test_send_failure_is_recorded_and_invoice_untouched(invoice, mailoutbox, exc
     assert mailoutbox == []
 
 
-def test_blank_freelancer_email_fails_that_delivery_only(freelancer_user, bill_march, mailoutbox):
+@pytest.fixture
+def blank_freelancer_email(freelancer_user):
     freelancer_user.email = ''
     freelancer_user.save()
-    invoice = bill_march()
 
-    deliver_invoices([invoice.pk])
 
+def test_blank_address_is_issued_failed_and_never_attempted(blank_freelancer_email, invoice, mailoutbox):
     blank = freelancer_delivery(invoice)
-    assert blank.status == InvoiceDelivery.STATUS_FAILED
-    assert blank.last_error == MISSING_EMAIL_ERROR
-    assert blank.attempts == 1
-    assert company_delivery(invoice).status == InvoiceDelivery.STATUS_SENT
+    assert (blank.status, blank.attempts, blank.last_error) == ('failed', 0, MISSING_EMAIL_ERROR)
+
+    send_for(invoice)
+    for _ in range(2):
+        output = run_command()
+
     assert [m.to for m in mailoutbox] == [[COMPANY_EMAIL]]
+    blank.refresh_from_db()
+    assert (blank.status, blank.attempts) == ('failed', 0)
+    assert company_delivery(invoice).status == InvoiceDelivery.STATUS_SENT
+    assert output.strip() == (
+        'Sent 0, skipped 0. 1 failed deliveries cannot be retried and need manual follow-up.'
+    )
 
 
 @pytest.fixture
@@ -172,7 +185,7 @@ def test_post_run_delivery_stops_at_the_first_send_failure(two_invoices, mailout
     at most), not one per delivery."""
     send = patch.object(EmailMessage, 'send', side_effect=ConnectionRefusedError(61, 'refused'))
     with send as mock_send:
-        deliver_invoices([invoice.pk for invoice in two_invoices])
+        send_for(*two_invoices)
 
     assert mock_send.call_count == 1
     rows = list(InvoiceDelivery.objects.filter(invoice__in=two_invoices))  # attempt order
@@ -182,21 +195,16 @@ def test_post_run_delivery_stops_at_the_first_send_failure(two_invoices, mailout
     assert 'ConnectionRefusedError' in rows[0].last_error
 
     # SMTP is back: the command sends everything that is left.
-    assert run_command().strip() == 'Sent 4, failed 0, skipped 0.'
+    assert run_command().strip() == 'Sent 4, skipped 0.'
     assert len(mailoutbox) == 4
 
 
-def test_blank_email_does_not_stop_post_run_delivery(two_invoices, mailoutbox):
-    # Blank the address on the first invoice's freelancer delivery, which is
-    # attempted before the second invoice's deliveries.
+def test_blank_address_does_not_stop_post_run_delivery(blank_freelancer_email, two_invoices, mailoutbox):
     first, second = two_invoices
-    InvoiceDelivery.objects.filter(
-        invoice=first, recipient_type=InvoiceDelivery.RECIPIENT_FREELANCER
-    ).update(email='')
+    assert freelancer_delivery(first).email == ''  # issued before the second invoice's rows
 
-    deliver_invoices([first.pk, second.pk])
+    send_for(first, second)
 
-    assert freelancer_delivery(first).last_error == MISSING_EMAIL_ERROR
     assert company_delivery(second).status == InvoiceDelivery.STATUS_SENT
     assert freelancer_delivery(second).status == InvoiceDelivery.STATUS_SENT
     assert len(mailoutbox) == 3
@@ -207,7 +215,7 @@ def test_blank_email_does_not_stop_post_run_delivery(two_invoices, mailoutbox):
 def test_command_sends_pending_deliveries(invoice, mailoutbox):
     output = run_command()
 
-    assert output.strip() == 'Sent 2, failed 0, skipped 0.'
+    assert output.strip() == 'Sent 2, skipped 0.'
     assert len(mailoutbox) == 2
     assert set(
         InvoiceDelivery.objects.filter(invoice=invoice).values_list('status', flat=True)
@@ -216,56 +224,56 @@ def test_command_sends_pending_deliveries(invoice, mailoutbox):
 
 def test_command_resends_only_the_failed_recipient(invoice, mailoutbox):
     with send_raising(smtplib.SMTPException('rejected'), only_to=FREELANCER_EMAIL):
-        deliver_invoices([invoice.pk])
+        send_for(invoice)
     assert [m.to for m in mailoutbox] == [[COMPANY_EMAIL]]
     assert freelancer_delivery(invoice).status == InvoiceDelivery.STATUS_FAILED
     mailoutbox.clear()
 
     output = run_command()
 
-    assert output.strip() == 'Sent 1, failed 0, skipped 0.'
+    assert output.strip() == 'Sent 1, skipped 0.'
     assert [m.to for m in mailoutbox] == [[FREELANCER_EMAIL]]
     retried, untouched = freelancer_delivery(invoice), company_delivery(invoice)
     assert (retried.status, retried.attempts, retried.last_error) == ('sent', 2, '')
     assert (untouched.status, untouched.attempts) == ('sent', 1)
 
 
-def test_command_stops_retrying_after_max_attempts(invoice, mailoutbox):
+def test_outage_only_spends_the_attempts_of_the_first_row(invoice, mailoutbox):
+    first, second = InvoiceDelivery.objects.filter(invoice=invoice).order_by('pk')
     with send_raising(smtplib.SMTPException('down')):
         for _ in range(MAX_ATTEMPTS):
             output = run_command()
 
-    rows = list(InvoiceDelivery.objects.filter(invoice=invoice))
-    assert [(r.status, r.attempts) for r in rows] == [('failed', MAX_ATTEMPTS)] * 2
-    # The final attempt reports the failures, their ids and that they are now exhausted.
-    assert output.splitlines() == [
-        'Sent 0, failed 2, skipped 0. 2 deliveries have exhausted 5 attempts '
-        'and need manual follow-up.',
-        f'Failed delivery ids: {rows[0].pk}, {rows[1].pk}',
-    ]
+    # Every run stops at the first failure, so only the first row used its attempts.
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert (first.status, first.attempts) == ('failed', MAX_ATTEMPTS)
+    assert (second.status, second.attempts) == ('pending', 0)
+    assert output.strip() == (
+        f'Sent 0, skipped 0. Delivery {first.pk} failed; stopped with 1 left for the next run.'
+        ' 1 failed deliveries cannot be retried and need manual follow-up.'
+    )
 
-    # With sending working again, exhausted rows are still left alone.
+    # With sending working again, the exhausted row is left alone.
     output = run_command()
 
-    assert mailoutbox == []
-    assert [(r.status, r.attempts) for r in InvoiceDelivery.objects.filter(invoice=invoice)] == [
-        ('failed', MAX_ATTEMPTS)
-    ] * 2
+    assert [m.to for m in mailoutbox] == [[second.email]]
+    first.refresh_from_db()
+    assert (first.status, first.attempts) == ('failed', MAX_ATTEMPTS)
     assert output.strip() == (
-        'Sent 0, failed 0, skipped 0. 2 deliveries have exhausted 5 attempts '
-        'and need manual follow-up.'
+        'Sent 1, skipped 0. 1 failed deliveries cannot be retried and need manual follow-up.'
     )
 
 
 # --- No double send ----------------------------------------------------------
 
 def test_sent_delivery_is_not_sent_again(invoice, mailoutbox):
-    deliver_invoices([invoice.pk])
+    send_for(invoice)
     row = company_delivery(invoice)
     mailoutbox.clear()
 
     assert attempt_delivery(row.pk) is None
-    assert run_command().strip() == 'Sent 0, failed 0, skipped 0.'
+    assert run_command().strip() == 'Sent 0, skipped 0.'
     assert mailoutbox == []
     row.refresh_from_db()
     assert (row.status, row.attempts) == ('sent', 1)
@@ -348,7 +356,7 @@ def test_abandoned_row_on_last_attempt_is_marked_failed_and_reported(invoice, ma
     row.refresh_from_db()
     assert (row.status, row.attempts) == ('failed', MAX_ATTEMPTS)
     assert row.last_error == ABANDONED_ERROR
-    assert '1 deliveries have exhausted 5 attempts' in output
+    assert '1 failed deliveries cannot be retried' in output
     assert [m.to for m in mailoutbox] == [[FREELANCER_EMAIL]]  # only the pending row
 
 
@@ -377,5 +385,5 @@ def test_crash_in_post_commit_send_keeps_the_invoice(northstar, admin_user, marc
     assert set(invoice.deliveries.values_list('status', flat=True)) == {InvoiceDelivery.STATUS_PENDING}
     assert mailoutbox == []
 
-    assert run_command().strip() == 'Sent 2, failed 0, skipped 0.'
+    assert run_command().strip() == 'Sent 2, skipped 0.'
     assert len(mailoutbox) == 2

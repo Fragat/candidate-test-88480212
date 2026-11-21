@@ -1,34 +1,30 @@
 """Send pending invoice emails and retry failed ones.
 
-The billing run makes one delivery attempt straight after it commits; this
-command picks up everything that attempt didn't finish.
-
 In production this would run on a schedule (e.g. cron).
 """
 from django.core.management.base import BaseCommand
 
-from billing.delivery import MAX_ATTEMPTS, retry_deliveries
+from billing.delivery import MAX_ATTEMPTS, count_needing_follow_up, process_outbox
 
 
 class Command(BaseCommand):
     help = (
         'Send pending invoice emails and retry failed ones (up to '
-        f'{MAX_ATTEMPTS} attempts). Meant to run on a schedule in production; '
-        'not scheduled in this project.'
+        f'{MAX_ATTEMPTS} attempts), stopping at the first failed send.'
     )
 
     def handle(self, *args: str, **options: str | int | bool | None) -> None:
-        summary = retry_deliveries()
+        summary = process_outbox()
+        follow_up = count_needing_follow_up()
 
-        message = f'Sent {summary.sent}, failed {summary.failed}, skipped {summary.skipped}.'
-        if summary.exhausted:
+        message = f'Sent {summary.sent}, skipped {summary.skipped}.'
+        if summary.failed_id is not None:
             message += (
-                f' {summary.exhausted} deliveries have exhausted {MAX_ATTEMPTS} attempts'
-                f' and need manual follow-up.'
+                f' Delivery {summary.failed_id} failed; stopped with'
+                f' {summary.deferred} left for the next run.'
             )
-        style = self.style.WARNING if summary.failed or summary.exhausted else self.style.SUCCESS
-        self.stdout.write(style(message))
+        if follow_up:
+            message += f' {follow_up} failed deliveries cannot be retried and need manual follow-up.'
 
-        if summary.failed_ids:
-            ids = ', '.join(str(pk) for pk in summary.failed_ids)
-            self.stdout.write(self.style.WARNING(f'Failed delivery ids: {ids}'))
+        failed = summary.failed_id is not None or follow_up
+        self.stdout.write((self.style.WARNING if failed else self.style.SUCCESS)(message))

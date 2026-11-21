@@ -7,13 +7,12 @@ Delivery is at-least-once. If we fail to save that sending completed, it will re
 """
 import datetime
 import logging
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 
 from django.conf import settings
 from django.core.mail import EmailMessage
-from django.db.models import F, Q
+from django.db.models import F, Q, QuerySet
 from django.utils import timezone
 
 from .models import Invoice, InvoiceDelivery
@@ -27,11 +26,24 @@ MISSING_EMAIL_ERROR = 'No email address on record for this recipient.'
 ABANDONED_ERROR = 'Delivery attempt never completed (sender stopped mid-send); attempts exhausted.'
 
 
+def new_delivery(*, invoice: Invoice, recipient_type: str, email: str) -> InvoiceDelivery:
+    """Unsaved outbox row for one recipient."""
+    if not email:
+        # Missing email means this will never be deliverable, so just mark as failed and skip it.
+        return InvoiceDelivery(
+            invoice=invoice,
+            recipient_type=recipient_type,
+            status=InvoiceDelivery.STATUS_FAILED,
+            last_error=MISSING_EMAIL_ERROR,
+        )
+    return InvoiceDelivery(invoice=invoice, recipient_type=recipient_type, email=email)
+
+
 def _claimable(now: datetime.datetime) -> Q:
-    # Invoices can be sent if they:
-    # Have no hit max attempts
+    # Deliveries can be sent if they:
+    # Have an address AND have not hit max attempts AND
     # Are pending, failed or have been stuck in sending for too long.
-    return Q(attempts__lt=MAX_ATTEMPTS) & (
+    return Q(attempts__lt=MAX_ATTEMPTS) & ~Q(email='') & (
         Q(status__in=[InvoiceDelivery.STATUS_PENDING, InvoiceDelivery.STATUS_FAILED])
         | Q(status=InvoiceDelivery.STATUS_SENDING, last_attempt_at__lt=now - STALE_SENDING_AFTER)
     )
@@ -62,11 +74,6 @@ def attempt_delivery(delivery_id: int) -> str | None:
     if delivery is None:  # re-claimed since our claim; not ours to send
         return None
 
-    if not delivery.email:
-        in_flight.update(status=InvoiceDelivery.STATUS_FAILED, last_error=MISSING_EMAIL_ERROR)
-        logger.warning('Invoice delivery %s has no recipient address', delivery_id)
-        return InvoiceDelivery.STATUS_FAILED
-
     try:
         build_invoice_email(delivery.invoice, delivery.email).send(fail_silently=False)
     except Exception as exc:  # SMTP errors, timeouts, connection refused etc.
@@ -81,68 +88,57 @@ def attempt_delivery(delivery_id: int) -> str | None:
     return InvoiceDelivery.STATUS_SENT
 
 
-def deliver_invoices(invoice_ids: Iterable[int]) -> None:
-    """First delivery attempt for freshly issued invoices.
-
-    Runs after the billing run's transaction commits. It stops at the first failed send to avoid waiting
-    an unreasonable amount of time.
-
-    A blank recipient address doesn't stop the batch: that failure is about
-    one recipient, not the mail server.
-    """
-    rows = InvoiceDelivery.objects.filter(
-        invoice_id__in=invoice_ids, status=InvoiceDelivery.STATUS_PENDING
-    ).values_list('pk', 'email')
-    for delivery_id, email in list(rows):
-        result = attempt_delivery(delivery_id)
-        if result == InvoiceDelivery.STATUS_FAILED and email:
-            # Assume that a failure means an issue with the mail server, so wait for a future run.
-            logger.warning(
-                'Stopping post-run delivery after a send failure; '
-                'remaining deliveries are left pending for send_invoice_emails.'
-            )
-            break
-
-
 @dataclass
-class RetrySummary:
+class SendSummary:
     sent: int = 0
-    failed: int = 0
-    skipped: int = 0
-    exhausted: int = 0
-    failed_ids: list[int] = field(default_factory=list)
+    skipped: int = 0  # claimed by another sender first
+    failed_id: int | None = None  # the failed send that stopped the batch
+    deferred: int = 0  # not attempted because the batch stopped
 
 
-def retry_deliveries() -> RetrySummary:
-    """Retry every delivery that is pending, failed (with attempts left) or
-    stuck in `sending`. Rows that have used all attempts stay `failed` for
-    manual follow-up."""
-    now = timezone.now()
-    summary = RetrySummary()
-    # A sender that died while holding a row on its last attempt would leave it in `sending` forever;
-    # record it as failed so it is reported below. Not strictly necessary, but useful for traceability.
-    InvoiceDelivery.objects.filter(
-        status=InvoiceDelivery.STATUS_SENDING,
-        last_attempt_at__lt=now - STALE_SENDING_AFTER,
-        attempts__gte=MAX_ATTEMPTS,
-    ).update(status=InvoiceDelivery.STATUS_FAILED, last_error=ABANDONED_ERROR)
-
+def send_deliveries(deliveries: QuerySet[InvoiceDelivery]) -> SendSummary:
+    """
+    Attempt to deliver every pending email (plus failed ones needing a retry), stopping at the first failed send.
+    Anything not attempted stays claimable for the next run.
+    """
     ids = list(
-        InvoiceDelivery.objects.filter(_claimable(now)).order_by('pk').values_list('pk', flat=True)
+        deliveries.filter(_claimable(timezone.now())).order_by('pk').values_list('pk', flat=True)
     )
-    for delivery_id in ids:
+    summary = SendSummary()
+    for position, delivery_id in enumerate(ids):
         result = attempt_delivery(delivery_id)
         if result == InvoiceDelivery.STATUS_SENT:
             summary.sent += 1
         elif result == InvoiceDelivery.STATUS_FAILED:
-            summary.failed += 1
-            summary.failed_ids.append(delivery_id)
+            summary.failed_id = delivery_id
+            summary.deferred = len(ids) - position - 1
+            logger.warning(
+                'Stopping invoice delivery after a send failure; %s deliveries left for the next run.',
+                summary.deferred,
+            )
+            break
         else:
             summary.skipped += 1
-    summary.exhausted = InvoiceDelivery.objects.filter(
-        status=InvoiceDelivery.STATUS_FAILED, attempts__gte=MAX_ATTEMPTS
-    ).count()
     return summary
+
+
+def process_outbox() -> SendSummary:
+    """One scheduled pass over the whole outbox."""
+    # A sender that died while holding a row on its last attempt would leave it in `sending` forever;
+    # record it as failed so it is counted by `count_needing_follow_up`.
+    InvoiceDelivery.objects.filter(
+        status=InvoiceDelivery.STATUS_SENDING,
+        last_attempt_at__lt=timezone.now() - STALE_SENDING_AFTER,
+        attempts__gte=MAX_ATTEMPTS,
+    ).update(status=InvoiceDelivery.STATUS_FAILED, last_error=ABANDONED_ERROR)
+    return send_deliveries(InvoiceDelivery.objects.all())
+
+
+def count_needing_follow_up() -> int:
+    """Deliveries that have failed for good (no address, or out of attempts)."""
+    return InvoiceDelivery.objects.filter(
+        ~_claimable(timezone.now()), status=InvoiceDelivery.STATUS_FAILED
+    ).count()
 
 
 # --- Rendering ---------------------------------------------------------------
