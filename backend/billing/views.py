@@ -12,11 +12,13 @@ from rest_framework.views import APIView
 from billing.models import Invoice
 from billing.permissions import IsCompanyAdmin
 from billing.serializers import (
+    BillingRunRequestSerializer,
     BillingRunSerializer,
     InvoiceDetailSerializer,
+    InvoiceListQuerySerializer,
     InvoiceSummarySerializer,
 )
-from billing.services import InvalidMonth, parse_billable_month, parse_month, run_billing
+from billing.services import run_billing
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +33,9 @@ class BillingRunView(APIView):
     permission_classes = [IsAuthenticated, IsCompanyAdmin]
 
     def post(self, request: Request) -> Response:
-        # The body is arbitrary JSON: anything but a string month counts as missing.
-        month = request.data.get('month') if isinstance(request.data, dict) else None
-        if not isinstance(month, str):
-            month = None
-        try:
-            period = parse_billable_month(month)
-        except InvalidMonth as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        body = BillingRunRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        period = body.validated_data['month']
 
         company = request.user.company_admin.company
 
@@ -66,15 +63,12 @@ class InvoiceViewSet(viewsets.ViewSet):
 
     def list(self, request: Request) -> Response:
         """GET /api/invoices/?month=YYYY-MM (month optional)."""
+        query = InvoiceListQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+
         invoices = self.get_queryset()
-
-        month = request.query_params.get('month')
-        if month is not None:
-            try:
-                invoices = invoices.filter(period=parse_month(month))
-            except InvalidMonth as exc:
-                return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
+        if 'month' in query.validated_data:
+            invoices = invoices.filter(period=query.validated_data['month'])
         return Response(InvoiceSummarySerializer(invoices, many=True).data)
 
     def retrieve(self, request: Request, pk: str | None = None) -> Response:

@@ -1,11 +1,54 @@
+import datetime
+import re
 from collections.abc import Iterable
 
+from django.utils import timezone
 from rest_framework import serializers
 
 from billing.models import BillingRun, Invoice, InvoiceDelivery, InvoiceLine
 
 CURRENCY = 'GBP'
 RUN_STATUS_COMPLETED = 'completed'
+
+_MONTH_RE = re.compile(r'(\d{4})-(\d{2})', re.ASCII)
+
+
+class MonthField(serializers.Field):
+    """A month provided as 'YYYY-MM'. Serialised to the first day of that month in Python."""
+
+    default_error_messages = {'invalid': "Month must be in 'YYYY-MM' format."}
+
+    def to_internal_value(self, data: object) -> datetime.date:
+        match = _MONTH_RE.fullmatch(data) if isinstance(data, str) else None
+        if match is None:
+            self.fail('invalid')
+        try:
+            return datetime.date(int(match[1]), int(match[2]), 1)
+        except ValueError:  # month outside 01-12, or year 0000
+            self.fail('invalid')
+
+    def to_representation(self, value: datetime.date) -> str:
+        return f'{value:%Y-%m}'
+
+
+class BillingRunRequestSerializer(serializers.Serializer):
+    """Request body for POST /api/billing/runs/."""
+
+    month = MonthField()
+
+    def validate_month(self, period: datetime.date) -> datetime.date:
+        # Only completed months can be billed: billing the current month would lock out its later entries.
+        if period >= timezone.localdate().replace(day=1):
+            raise serializers.ValidationError(
+                f'Only completed months can be billed. {period:%B %Y} has not finished yet.'
+            )
+        return period
+
+
+class InvoiceListQuerySerializer(serializers.Serializer):
+    """Query parameters for GET /api/invoices/."""
+
+    month = MonthField(required=False)
 
 
 def aggregate_delivery_status(deliveries: Iterable[InvoiceDelivery]) -> str:
@@ -39,7 +82,7 @@ class BillingRunSerializer(serializers.ModelSerializer):
 
 
 class InvoiceSummarySerializer(serializers.ModelSerializer):
-    period = serializers.DateField(format='%Y-%m', read_only=True)
+    period = MonthField(read_only=True)
     currency = serializers.SerializerMethodField()
     delivery_status = serializers.SerializerMethodField()
 

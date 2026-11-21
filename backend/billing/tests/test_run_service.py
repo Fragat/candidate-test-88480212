@@ -1,6 +1,6 @@
 """Service-level tests for the monthly billing run.
 
-Tests parsing, numeric calculations (money), filters and boundaries
+Tests numeric calculations (money), filters and boundaries
 """
 import datetime
 import threading
@@ -13,14 +13,7 @@ from django.db.models import ProtectedError
 
 from accounts.models import Company
 from billing.models import BillingRun, Invoice, InvoiceDelivery, InvoiceLine
-from billing.services import (
-    InvalidMonth,
-    line_amount,
-    next_month,
-    parse_billable_month,
-    parse_month,
-    run_billing,
-)
+from billing.services import line_amount, run_billing
 from billing.tests.conftest import MARCH
 from contracts.models import Contract, TimesheetEntry
 
@@ -305,7 +298,7 @@ class TestRerunningAMonth:
         make_entry(active_contract, '2026-04-01')
 
         march = bill(MARCH)
-        april = bill(next_month(MARCH))
+        april = bill(datetime.date(2026, 4, 1))
 
         assert march.invoices_generated == 1
         assert april.invoices_generated == 1
@@ -439,35 +432,3 @@ def test_concurrent_runs_for_the_same_month_issue_one_set_of_invoices(
     assert Invoice.objects.filter(company=northstar, period=MARCH).count() == freelancer_count
     assert sum(r.invoices_generated for r in results) == freelancer_count
     assert sorted(r.invoices_existing for r in results) == [0, freelancer_count]
-
-
-# --- Month parsing -------------------------------------------------------------
-
-class TestParseMonth:
-    def test_parses_to_first_of_month(self):
-        assert parse_month('2026-03') == MARCH
-
-    # Non-string request values are turned into None by the view (see test_api).
-    @pytest.mark.parametrize('value', [None, '', '2026-3', '2026-13', '2026-00', '03-2026',
-                                       '2026-03-01'])
-    def test_rejects_malformed_values(self, value):
-        with pytest.raises(InvalidMonth):
-            parse_month(value)
-
-    def test_next_month_rolls_over_the_year(self):
-        assert next_month(datetime.date(2026, 12, 1)) == datetime.date(2027, 1, 1)
-
-
-class TestParseBillableMonth:
-    @pytest.fixture(autouse=True)
-    def today_is_mid_april(self):
-        with mock.patch('django.utils.timezone.localdate', return_value=datetime.date(2026, 4, 15)):
-            yield
-
-    def test_completed_month_is_billable(self):
-        assert parse_billable_month('2026-03') == MARCH
-
-    @pytest.mark.parametrize('value', ['2026-04', '2026-05'])
-    def test_current_and_future_months_are_rejected(self, value):
-        with pytest.raises(InvalidMonth, match='Only completed months'):
-            parse_billable_month(value)

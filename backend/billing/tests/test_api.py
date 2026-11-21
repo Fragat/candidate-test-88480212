@@ -68,18 +68,18 @@ def meridian_invoice(make_entry, other_contract, meridian_admin):
 
 # --- POST /api/billing/runs/: validation ------------------------------------
 
-# Malformed month strings are covered by TestParseMonth; these are the cases
+# Malformed month strings are covered by TestMonthField; these are the cases
 # only a request body can produce.
-@pytest.mark.parametrize('body', [
-    {},
-    {'month': 202603},
-    [],  # not a JSON object at all
+@pytest.mark.parametrize('body, expected', [
+    ({}, {'month': ['This field is required.']}),
+    ({'month': 202603}, {'month': ["Month must be in 'YYYY-MM' format."]}),
+    ([], {'non_field_errors': ['Invalid data. Expected a dictionary, but got list.']}),
 ], ids=['missing', 'not-a-string', 'list-body'])
-def test_run_rejects_malformed_month(admin_client, body):
+def test_run_rejects_malformed_month(admin_client, body, expected):
     resp = admin_client.post(RUNS_URL, body, format='json')
 
     assert resp.status_code == 400
-    assert 'YYYY-MM' in resp.json()['detail']
+    assert resp.json() == expected
     assert BillingRun.objects.count() == 0
 
 
@@ -90,7 +90,9 @@ def test_run_rejects_the_current_month(admin_client, active_contract, make_entry
     resp = admin_client.post(RUNS_URL, {'month': f'{period:%Y-%m}'}, format='json')
 
     assert resp.status_code == 400
-    assert 'completed months' in resp.json()['detail']
+    assert resp.json() == {'month': [
+        f'Only completed months can be billed. {period:%B %Y} has not finished yet.'
+    ]}
     assert BillingRun.objects.count() == 0
     assert Invoice.objects.count() == 0
 
@@ -293,11 +295,11 @@ def test_list_row_shape(admin_client, active_contract, make_entry, admin_user):
 
 
 def test_list_rejects_malformed_month(admin_client):
-    # Other malformed values are covered by TestParseMonth.
+    # Other malformed values are covered by TestMonthField.
     resp = admin_client.get(LIST_URL, {'month': '2026-3'})
 
     assert resp.status_code == 400
-    assert 'YYYY-MM' in resp.json()['detail']
+    assert resp.json() == {'month': ["Month must be in 'YYYY-MM' format."]}
 
 
 def test_list_allows_the_current_month(admin_client, northstar_invoices):

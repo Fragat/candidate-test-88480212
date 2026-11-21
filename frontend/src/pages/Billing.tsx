@@ -31,8 +31,8 @@ export default function Billing() {
       invoicesQuery.refetch()
     },
     onError: (error) => {
-      const detail = error instanceof ApiError ? error.data.detail : undefined
-      setRunError(typeof detail === 'string' ? detail : 'Billing run failed. Please try again.')
+      const message = error instanceof ApiError ? (error.data.month ?? error.data.detail) : undefined
+      setRunError(message ? String(message) : 'Billing run failed. Please try again.')
       setRunResult(null)
     },
   })
