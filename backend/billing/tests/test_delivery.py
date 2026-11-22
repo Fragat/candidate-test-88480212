@@ -23,7 +23,7 @@ from billing.delivery import (
 from billing.models import Invoice, InvoiceDelivery
 from billing.services import run_billing
 
-from .conftest import MARCH
+from billing.tests.conftest import MARCH
 
 pytestmark = pytest.mark.django_db
 

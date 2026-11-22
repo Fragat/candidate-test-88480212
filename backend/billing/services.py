@@ -18,8 +18,8 @@ from django.db import transaction
 from accounts.models import Company
 from contracts.models import TimesheetEntry
 
-from .delivery import new_delivery, send_deliveries
-from .models import BillingRun, Invoice, InvoiceDelivery, InvoiceLine
+from billing.delivery import new_delivery, send_deliveries
+from billing.models import BillingRun, Invoice, InvoiceDelivery, InvoiceLine
 
 logger = logging.getLogger(__name__)
 

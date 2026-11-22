@@ -1,7 +1,7 @@
 from django.urls import path
 from rest_framework.routers import SimpleRouter
 
-from . import views
+from billing import views
 
 router = SimpleRouter()
 router.register('invoices', views.InvoiceViewSet, basename='invoice')

@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.db.models import Model
 from django.http import HttpRequest
 
-from .models import BillingRun, Invoice, InvoiceDelivery, InvoiceLine
+from billing.models import BillingRun, Invoice, InvoiceDelivery, InvoiceLine
 
 
 class ReadOnlyAdmin(admin.ModelAdmin):

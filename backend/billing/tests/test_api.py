@@ -19,7 +19,7 @@ from billing.models import BillingRun, Invoice, InvoiceDelivery
 from billing.delivery import aggregate_delivery_status
 from billing.services import run_billing
 
-from .conftest import MARCH
+from billing.tests.conftest import MARCH
 
 RUNS_URL = '/api/billing/runs/'
 LIST_URL = '/api/invoices/'

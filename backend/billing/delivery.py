@@ -16,7 +16,7 @@ from django.core.mail import EmailMessage
 from django.db.models import F, Q, QuerySet
 from django.utils import timezone
 
-from .models import Invoice, InvoiceDelivery
+from billing.models import Invoice, InvoiceDelivery
 
 logger = logging.getLogger(__name__)
 
