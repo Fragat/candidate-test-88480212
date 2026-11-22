@@ -110,7 +110,8 @@ class InvoiceLine(models.Model):
 class InvoiceDelivery(models.Model):
     """Outbox row: one per recipient per invoice.
 
-    Rows are created `pending` with the invoice. Senders update while sending.
+    Rows are created with the invoice: `pending`, or already `failed` if the
+    recipient has no email address. Senders update while sending.
     Delivery is at-least-once.
     """
 

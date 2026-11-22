@@ -2,9 +2,9 @@
 
 Invoice generation is synchronous and happens inside one transaction.
 
-Email delivery is not: the run only writes `pending` InvoiceDelivery rows (the
-outbox) and makes one send attempt after commit. Anything not sent there is
-picked up by `manage.py send_invoice_emails`.
+Email delivery is not: the run only writes InvoiceDelivery rows (the outbox)
+and makes one send attempt after commit. Anything not sent there is picked up
+by `manage.py send_invoice_emails`.
 """
 import datetime
 import logging
