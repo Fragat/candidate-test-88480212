@@ -26,7 +26,7 @@ Key implementation notes:
   - Scheduling the management command, as there was no existing place for a cron and it depends on how this gets deployed.
 
 My Workflow:
-- Wrote down my own thoughts first (structure, async processing, idempotency, changes within a month).
+- Wrote down my own thoughts first (structure, async processing, idempotency, handling changes for billed months).
 - Used a Claude skill to turn those notes into a plan (with clarifying questions) and a prompt for a fresh session, which ran sub-agents to write, research and review the code.
 - AI worked well for edge cases but went beyond scope (an edit lock, extra validation, too many duplicate tests, lots of obtuse conditional logic), which I removed.
 - Then my own review: a broad pass for flow and key logic, a code-review skill for targeted fixes, then an in-depth read for style and domain structure, which AI struggles with. Kept comments only where useful.
@@ -34,6 +34,10 @@ My Workflow:
 
 Next steps:
 - If I had four hours, I'd first ask "Is it actually already good enough?". If so then I'd spend those four hours elsewhere!
+- Some immediate parts I was considering but was running low on time are:
+  - Reconsider primary keys for all of these. Probably UUIDs.
+  - Spend more time reviewing tests and useful edge cases.
+  - Model naming. The current names were sensible but I think could be simpler.
 - Lock billed entries against edits and add supplementary invoices for late approvals: a big gap, likely done alongside Task A.
 - Automatically generate invoices. Why does someone need to push a button? Just do it for them at the start of each new month covering the last one (with a few days' grace for late logging).
 - Move email (and PDF generation) onto an event queue with workers, replacing the post-commit attempt and cron, so large batches scale.
