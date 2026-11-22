@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.mail import EmailMessage
-from django.db.models import F, Q, QuerySet
+from django.db.models import Q, QuerySet
 from django.utils import timezone
 
 from billing.models import Invoice, InvoiceDelivery
@@ -70,36 +70,31 @@ def attempt_delivery(delivery_id: int) -> str | None:
     attempts).
 
     `attempts` is incremented at claim time, so a sender that crashes
-    mid-send still uses up an attempt and a row can't loop forever.
+    mid-send still uses up an attempt and a row can't loop forever. This is used to check another
+    attempt hasn't been made for this InvoiceDelivery.
     """
+    delivery = InvoiceDelivery.objects.select_related('invoice').get(pk=delivery_id)
+    attempt = delivery.attempts + 1
     now = timezone.now()
-    claimed = (
-        InvoiceDelivery.objects.filter(_claimable(now), pk=delivery_id)
-        .update(status=InvoiceDelivery.STATUS_SENDING, attempts=F('attempts') + 1, last_attempt_at=now)
-    )
+    claimed = InvoiceDelivery.objects.filter(
+        _claimable(now), pk=delivery_id, attempts=delivery.attempts
+    ).update(status=InvoiceDelivery.STATUS_SENDING, attempts=attempt, last_attempt_at=now)
     if not claimed:
         return None
 
-    # Requery to ensure our object hasn't been picked up elsewhere.
     # Work with the queryset to avoid calling .save() on an individual object.
-    in_flight = InvoiceDelivery.objects.filter(
-        pk=delivery_id, status=InvoiceDelivery.STATUS_SENDING, last_attempt_at=now
-    )
-    delivery = in_flight.select_related('invoice').first()
-    if delivery is None:  # re-claimed since our claim; not ours to send
-        return None
-
+    this_claim = InvoiceDelivery.objects.filter(pk=delivery_id, attempts=attempt)
     try:
         build_invoice_email(delivery.invoice, delivery.email).send(fail_silently=False)
     except Exception as exc:  # SMTP errors, timeouts, connection refused etc.
-        in_flight.update(
+        this_claim.update(
             status=InvoiceDelivery.STATUS_FAILED,
             last_error=f'{type(exc).__name__}: {exc}'[:2000],
         )
         logger.warning('Invoice delivery %s failed: %s', delivery_id, exc)
         return InvoiceDelivery.STATUS_FAILED
 
-    in_flight.update(status=InvoiceDelivery.STATUS_SENT, sent_at=timezone.now(), last_error='')
+    this_claim.update(status=InvoiceDelivery.STATUS_SENT, sent_at=timezone.now(), last_error='')
     return InvoiceDelivery.STATUS_SENT
 
 

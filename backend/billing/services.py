@@ -75,16 +75,14 @@ def run_billing(*, company: Company, triggered_by: User, period: datetime.date) 
             invoices_generated=len(to_issue),
             invoices_existing=len(already_invoiced),
         )
-        new_invoice_ids = [
-            _issue_invoice(run=run, company=company, period=period, entries=freelancer_entries).pk
-            for freelancer_entries in to_issue
-        ]
+        for freelancer_entries in to_issue:
+            _issue_invoice(run=run, entries=freelancer_entries)
 
-        if new_invoice_ids:
+        if to_issue:
             # Never send email inside the transaction. robust=True: a failure
             # in the post-commit send must not turn a committed run into a 500.
             transaction.on_commit(
-                lambda: send_deliveries(InvoiceDelivery.objects.filter(invoice_id__in=new_invoice_ids)),
+                lambda: send_deliveries(InvoiceDelivery.objects.filter(invoice__billing_run=run)),
                 robust=True,
             )
 
@@ -95,9 +93,9 @@ def run_billing(*, company: Company, triggered_by: User, period: datetime.date) 
     return run
 
 
-def _issue_invoice(
-    *, run: BillingRun, company: Company, period: datetime.date, entries: list[TimesheetEntry]
-) -> Invoice:
+def _issue_invoice(*, run: BillingRun, entries: list[TimesheetEntry]) -> Invoice:
+    company = run.company
+    period = run.period
     freelancer = entries[0].contract.freelancer  # Grouped by freelancer so all entries should be the same
     lines = [
         InvoiceLine(
