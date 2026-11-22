@@ -101,7 +101,6 @@ def attempt_delivery(delivery_id: int) -> str | None:
 @dataclass
 class SendSummary:
     sent: int = 0
-    skipped: int = 0  # claimed by another sender first
     failed_id: int | None = None  # the failed send that stopped the batch
     deferred: int = 0  # not attempted because the batch stopped
 
@@ -127,8 +126,7 @@ def send_deliveries(deliveries: QuerySet[InvoiceDelivery]) -> SendSummary:
                 summary.deferred,
             )
             break
-        else:
-            summary.skipped += 1
+        # None: another sender claimed the row first, so it is theirs to report.
     return summary
 
 

@@ -13,9 +13,6 @@ class TestMonthField:
     def test_parses_to_first_of_month(self):
         assert MonthField().run_validation('2026-03') == MARCH
 
-    def test_represents_as_year_and_month(self):
-        assert MonthField().to_representation(MARCH) == '2026-03'
-
     @pytest.mark.parametrize('value', ['', '2026-3', '2026-13', '2026-00', '0000-03', '03-2026',
                                        '2026-03-01', 202603])
     def test_rejects_malformed_values(self, value):

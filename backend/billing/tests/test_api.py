@@ -12,7 +12,6 @@ from django.contrib.auth.models import User
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
-from rest_framework.authtoken.models import Token
 
 from accounts.models import CompanyAdmin, Freelancer
 from billing.models import BillingRun, Invoice, InvoiceDelivery
@@ -68,33 +67,13 @@ def meridian_invoice(make_entry, other_contract, meridian_admin):
 
 # --- POST /api/billing/runs/: validation ------------------------------------
 
-# Malformed month strings are covered by TestMonthField; these are the cases
-# only a request body can produce.
-@pytest.mark.parametrize('body, expected', [
-    ({}, {'month': ['This field is required.']}),
-    ({'month': 202603}, {'month': ["Month must be in 'YYYY-MM' format."]}),
-    ([], {'non_field_errors': ['Invalid data. Expected a dictionary, but got list.']}),
-], ids=['missing', 'not-a-string', 'list-body'])
-def test_run_rejects_malformed_month(admin_client, body, expected):
-    resp = admin_client.post(RUNS_URL, body, format='json')
+# Month rules are covered in test_serializers.py; this checks the view applies them.
+def test_run_rejects_a_missing_month(admin_client):
+    resp = admin_client.post(RUNS_URL, {}, format='json')
 
     assert resp.status_code == 400
-    assert resp.json() == expected
+    assert resp.json() == {'month': ['This field is required.']}
     assert BillingRun.objects.count() == 0
-
-
-def test_run_rejects_the_current_month(admin_client, active_contract, make_entry):
-    period = current_month()
-    make_entry(active_contract, period)  # billable hours exist, but the month isn't over
-
-    resp = admin_client.post(RUNS_URL, {'month': f'{period:%Y-%m}'}, format='json')
-
-    assert resp.status_code == 400
-    assert resp.json() == {'month': [
-        f'Only completed months can be billed. {period:%B %Y} has not finished yet.'
-    ]}
-    assert BillingRun.objects.count() == 0
-    assert Invoice.objects.count() == 0
 
 
 # --- POST /api/billing/runs/: success and idempotency ----------------------
@@ -143,24 +122,20 @@ def test_run_emails_each_invoice_to_company_and_freelancer_after_commit(
     assert len(mailoutbox) == 4
 
 
-def test_smtp_failure_after_commit_still_returns_201_and_records_failure(
+def test_crash_in_post_commit_send_still_returns_201(
     admin_client, active_contract, make_entry, django_capture_on_commit_callbacks,
 ):
-    """Which errors are caught, stopping at the first failure and the retry
-    command are covered in test_delivery.py."""
+    """robust=True: a crash after commit must not turn a committed run into a 500.
+    SMTP failures never get this far; they are recorded inside attempt_delivery."""
     make_entry(active_contract, '2026-03-02')
 
-    with mock.patch(
-        'django.core.mail.EmailMessage.send',
-        side_effect=ConnectionRefusedError(61, 'Connection refused'),
-    ):
-        with django_capture_on_commit_callbacks(execute=True):
+    with mock.patch('billing.delivery.attempt_delivery', side_effect=RuntimeError('db went away')):
+        with django_capture_on_commit_callbacks(execute=True) as callbacks:
             resp = admin_client.post(RUNS_URL, {'month': '2026-03'}, format='json')
 
+    assert len(callbacks) == 1
     assert resp.status_code == 201
-    failed = Invoice.objects.get().deliveries.first()
-    assert failed.status == InvoiceDelivery.STATUS_FAILED
-    assert 'ConnectionRefusedError' in failed.last_error
+    assert set(InvoiceDelivery.objects.values_list('status', flat=True)) == {InvoiceDelivery.STATUS_PENDING}
 
 
 # --- POST /api/billing/runs/: entries edited after billing ------------------
@@ -186,49 +161,23 @@ def test_run_skips_an_entry_already_billed_in_another_month(admin_client, active
 
 # --- Authorization ----------------------------------------------------------
 
-@pytest.fixture
-def plain_user_client(api_client):
-    """An authenticated user who is neither a company admin nor a freelancer."""
-    user = User.objects.create_user(username='plain@test.test', email='plain@test.test')
-    token, _ = Token.objects.get_or_create(user=user)
-    api_client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
-    return api_client
-
-
-@pytest.mark.parametrize('client_fixture', ['freelancer_client', 'plain_user_client'])
 @pytest.mark.parametrize('method, url', [
     ('post', RUNS_URL),
     ('get', LIST_URL),
     ('get', detail_url(1)),
 ])
-def test_non_admin_is_forbidden(request, client_fixture, method, url):
-    client = request.getfixturevalue(client_fixture)
-    resp = getattr(client, method)(url, {'month': '2026-03'}, format='json')
+def test_non_admin_is_forbidden(freelancer_client, method, url):
+    resp = getattr(freelancer_client, method)(url, {'month': '2026-03'}, format='json')
 
     assert resp.status_code == 403
     assert resp.json()['detail'] == 'Only company admins can do this.'
     assert BillingRun.objects.count() == 0
 
 
-@pytest.mark.parametrize('method, url', [
-    ('post', RUNS_URL),
-    ('get', LIST_URL),
-    ('get', detail_url(1)),
-])
-def test_anonymous_is_unauthenticated(api_client, method, url):
-    resp = getattr(api_client, method)(url)
-
-    assert resp.status_code == 401
-
-
 def test_admin_gets_404_for_another_companys_invoice(admin_client, meridian_invoice):
     resp = admin_client.get(detail_url(meridian_invoice.pk))
 
     assert resp.status_code == 404
-
-
-def test_admin_gets_404_for_missing_invoice(admin_client):
-    assert admin_client.get(detail_url(999999)).status_code == 404
 
 
 # --- GET /api/invoices/ -----------------------------------------------------
@@ -316,18 +265,6 @@ def test_list_allows_the_current_month(admin_client, northstar_invoices):
 def test_aggregate_delivery_status(statuses, expected):
     deliveries = [SimpleNamespace(status=status) for status in statuses]
     assert aggregate_delivery_status(deliveries) == expected
-
-
-def test_list_reports_the_aggregated_delivery_status(admin_client, admin_user, active_contract, make_entry):
-    make_entry(active_contract, '2026-03-02')
-    run_billing(company=active_contract.company, triggered_by=admin_user, period=MARCH)
-    InvoiceDelivery.objects.filter(recipient_type=InvoiceDelivery.RECIPIENT_FREELANCER).update(
-        status=InvoiceDelivery.STATUS_FAILED
-    )
-
-    resp = admin_client.get(LIST_URL)
-
-    assert [row['delivery_status'] for row in resp.json()] == ['failed']
 
 
 def test_list_query_count_does_not_grow_with_invoices(

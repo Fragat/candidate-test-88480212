@@ -19,7 +19,7 @@ class Command(BaseCommand):
         summary = process_outbox()
         follow_up = count_needing_follow_up()
 
-        message = f'Sent {summary.sent}, skipped {summary.skipped}.'
+        message = f'Sent {summary.sent}.'
         if summary.failed_id is not None:
             message += (
                 f' Delivery {summary.failed_id} failed; stopped with'

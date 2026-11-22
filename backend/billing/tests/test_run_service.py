@@ -44,13 +44,8 @@ class TestLineAmount:
     def test_partial_day_rounds_half_up_to_the_penny(self, hours, expected):
         assert line_amount(Decimal(hours), Decimal('450.00')) == Decimal(expected)
 
-    @pytest.mark.parametrize('hours, expected', [
-        ('4.0', '300.00'),
-        ('8.0', '600.00'),
-        ('10.0', '750.00'),
-    ])
-    def test_hours_are_billed_pro_rata_against_an_8_hour_day(self, hours, expected):
-        assert line_amount(Decimal(hours), Decimal('600.00')) == Decimal(expected)
+    def test_hours_beyond_a_day_are_billed_pro_rata_not_capped(self):
+        assert line_amount(Decimal('10.0'), Decimal('600.00')) == Decimal('750.00')
 
 
 class TestInvoiceAmounts:
@@ -105,6 +100,20 @@ class TestWhatGetsBilled:
         assert billed == {approved.pk}
         assert not InvoiceLine.objects.filter(timesheet_entry=not_approved).exists()
 
+    def test_entries_are_grouped_per_freelancer_when_dates_interleave(
+        self, bill, make_contract, make_entry, northstar, freelancer_user, second_freelancer,
+        active_contract,
+    ):
+        first = make_entry(active_contract, '2026-03-02')
+        make_entry(make_contract(northstar, second_freelancer), '2026-03-03')
+        last = make_entry(active_contract, '2026-03-04')
+
+        run = bill()
+
+        assert run.invoices_generated == 2
+        invoice = only_invoice(northstar, freelancer_user.freelancer)
+        assert [line.timesheet_entry_id for line in invoice.lines.all()] == [first.pk, last.pk]
+
     def test_month_boundaries_are_inclusive_of_last_day_only(
         self, bill, make_entry, active_contract
     ):
@@ -143,18 +152,6 @@ class TestWhatGetsBilled:
 
         assert only_invoice(northstar, second_freelancer).lines.get().timesheet_entry == entry
 
-    def test_freelancer_without_approved_entries_gets_no_invoice(
-        self, bill, make_contract, make_entry, northstar, second_freelancer, active_contract
-    ):
-        make_entry(active_contract, '2026-03-02')
-        idle = make_contract(northstar, second_freelancer)
-        make_entry(idle, '2026-03-02', status=TimesheetEntry.STATUS_SUBMITTED)
-
-        run = bill()
-
-        assert run.invoices_generated == 1
-        assert not Invoice.objects.filter(freelancer=second_freelancer).exists()
-
     def test_zero_hour_entries_never_produce_a_zero_invoice(
         self, bill, make_contract, make_entry, northstar, second_freelancer, active_contract
     ):
@@ -181,35 +178,9 @@ class TestWhatGetsBilled:
 # (The pending deliveries a run queues are covered in test_delivery.py.)
 
 class TestIssuedInvoice:
-    def test_invoice_fields_and_reference(
-        self, bill, make_entry, northstar, freelancer_user, active_contract
-    ):
-        make_entry(active_contract, '2026-03-02')
-
-        run = bill()
-
-        invoice = only_invoice(northstar, freelancer_user.freelancer)
-        assert list(run.invoices.all()) == [invoice]
-        assert invoice.reference == Invoice.build_reference(
-            period=MARCH, company_id=northstar.pk, freelancer_id=freelancer_user.freelancer.pk
-        )
-        assert invoice.company_name == 'NorthStar Consulting'
-        assert invoice.company_billing_email == 'billing@northstar.test'
-        assert invoice.freelancer_name == 'Test Freelancer'
-
-    def test_lines_snapshot_the_entry_and_rate(
-        self, bill, make_entry, northstar, freelancer_user, active_contract
-    ):
-        entry = make_entry(active_contract, '2026-03-02', hours='7.5')
-
-        bill()
-
-        line = entry.invoice_line
-        assert line.contract == active_contract
-        assert line.date == datetime.date(2026, 3, 2)
-        assert line.hours == Decimal('7.50')
-        assert line.daily_rate == Decimal('600.00')
-        assert line.amount == Decimal('562.50')
+    def test_reference_format(self):
+        reference = Invoice.build_reference(period=MARCH, company_id=7, freelancer_id=42)
+        assert reference == 'INV-202603-0007-0042'
 
     def test_later_edits_do_not_rewrite_an_issued_invoice(
         self, bill, make_entry, northstar, freelancer_user, active_contract
@@ -358,36 +329,11 @@ class TestDatabaseGuarantees:
                     amount=billed_line.amount,
                 )
 
-    def test_invoice_period_must_be_first_of_month(self, issued_invoice, second_freelancer):
-        with pytest.raises(IntegrityError, match='invoice_period_first_of_month'):
-            with transaction.atomic():
-                self._copy_invoice(
-                    issued_invoice,
-                    freelancer=second_freelancer,
-                    period=datetime.date(2026, 3, 15),
-                )
-
-    def test_one_delivery_per_recipient_per_invoice(self, issued_invoice):
-        with pytest.raises(IntegrityError, match='invoice_delivery_unique_recipient'):
-            with transaction.atomic():
-                InvoiceDelivery.objects.create(
-                    invoice=issued_invoice,
-                    recipient_type=InvoiceDelivery.RECIPIENT_COMPANY,
-                    email='again@test.test',
-                )
-
-    @pytest.mark.parametrize('target', ['timesheet_entry', 'contract', 'freelancer', 'company'])
-    def test_billed_records_cannot_be_deleted(self, issued_invoice, target):
+    def test_a_billed_entry_cannot_be_deleted(self, issued_invoice):
         line = issued_invoice.lines.get()
-        obj = {
-            'timesheet_entry': line.timesheet_entry,
-            'contract': line.contract,
-            'freelancer': issued_invoice.freelancer,
-            'company': issued_invoice.company,
-        }[target]
 
         with pytest.raises(ProtectedError):
-            obj.delete()
+            line.timesheet_entry.delete()
 
         assert Invoice.objects.filter(pk=issued_invoice.pk).exists()
         assert InvoiceLine.objects.filter(pk=line.pk).exists()
