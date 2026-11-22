@@ -6,9 +6,17 @@ import pytest
 from django.contrib.auth.models import User
 
 from accounts.models import Freelancer
+from billing.services import run_billing
+from billing.tests.data import MARCH
 from contracts.models import Contract, TimesheetEntry
 
-MARCH = datetime.date(2026, 3, 1)
+
+@pytest.fixture
+def bill(northstar, admin_user):
+    """bill(period=MARCH, company=northstar) -> BillingRun"""
+    def _bill(period=MARCH, company=northstar):
+        return run_billing(company=company, triggered_by=admin_user, period=period)
+    return _bill
 
 
 @pytest.fixture

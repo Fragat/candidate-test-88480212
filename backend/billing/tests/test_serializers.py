@@ -6,7 +6,7 @@ import pytest
 
 from billing.serializers import BillingRunRequestSerializer, MonthField
 
-from billing.tests.conftest import MARCH
+from billing.tests.data import MARCH
 
 
 class TestMonthField:

@@ -14,25 +14,15 @@ from django.db.models import ProtectedError
 from accounts.models import Company
 from billing.models import BillingRun, Invoice, InvoiceDelivery, InvoiceLine
 from billing.services import line_amount, run_billing
-from billing.tests.conftest import MARCH
+from billing.tests.data import MARCH
 from contracts.models import Contract, TimesheetEntry
 
 pytestmark = pytest.mark.django_db
 
 
-@pytest.fixture
-def bill(northstar, admin_user):
-    """bill(period=MARCH, company=northstar) -> BillingRun"""
-    def _bill(period=MARCH, company=northstar):
-        return run_billing(company=company, triggered_by=admin_user, period=period)
-    return _bill
-
-
 def only_invoice(company, freelancer, period=MARCH):
     return Invoice.objects.get(company=company, freelancer=freelancer, period=period)
 
-
-# --- Money -------------------------------------------------------------------
 
 class TestLineAmount:
     @pytest.mark.parametrize('hours, expected', [
@@ -81,8 +71,6 @@ class TestInvoiceAmounts:
         assert lines[second_contract.pk].amount == Decimal('225.00')
         assert invoice.total == Decimal('825.00')
 
-
-# --- Scope -------------------------------------------------------------------
 
 class TestWhatGetsBilled:
     @pytest.mark.parametrize('status', [
@@ -174,9 +162,6 @@ class TestWhatGetsBilled:
         assert not Invoice.objects.exists()
 
 
-# --- Snapshots -------------------------------------------------------------------
-# (The pending deliveries a run queues are covered in test_delivery.py.)
-
 class TestIssuedInvoice:
     def test_reference_format(self):
         reference = Invoice.build_reference(period=MARCH, company_id=7, freelancer_id=42)
@@ -205,8 +190,6 @@ class TestIssuedInvoice:
         line = invoice.lines.get()
         assert (line.daily_rate, line.amount) == (Decimal('600.00'), Decimal('562.50'))
 
-
-# --- Idempotency ---------------------------------------------------------------
 
 class TestRerunningAMonth:
     def test_second_run_records_a_run_but_creates_nothing(
@@ -278,8 +261,6 @@ class TestRerunningAMonth:
         ]
 
 
-# --- Database guarantees -------------------------------------------------------
-
 @pytest.fixture
 def issued_invoice(bill, make_entry, northstar, freelancer_user, active_contract):
     make_entry(active_contract, '2026-03-02')
@@ -339,42 +320,41 @@ class TestDatabaseGuarantees:
         assert InvoiceLine.objects.filter(pk=line.pk).exists()
 
 
-# --- Concurrency ---------------------------------------------------------------
+class TestConcurrentRuns:
+    @pytest.mark.django_db(transaction=True)
+    def test_concurrent_runs_for_the_same_month_issue_one_set_of_invoices(
+        self, make_contract, make_entry, northstar, admin_user, second_freelancer, active_contract
+    ):
+        """Two simultaneous runs are serialised by the company row lock: the second
+        waits, then sees the first's committed invoices and counts them as existing."""
+        make_entry(active_contract, '2026-03-02')
+        make_entry(make_contract(northstar, second_freelancer), '2026-03-02')
+        freelancer_count = 2
 
-@pytest.mark.django_db(transaction=True)
-def test_concurrent_runs_for_the_same_month_issue_one_set_of_invoices(
-    make_contract, make_entry, northstar, admin_user, second_freelancer, active_contract
-):
-    """Two simultaneous runs are serialised by the company row lock: the second
-    waits, then sees the first's committed invoices and counts them as existing."""
-    make_entry(active_contract, '2026-03-02')
-    make_entry(make_contract(northstar, second_freelancer), '2026-03-02')
-    freelancer_count = 2
+        barrier = threading.Barrier(2)
+        results, errors = [], []
 
-    barrier = threading.Barrier(2)
-    results, errors = [], []
+        def run():
+            try:
+                company = Company.objects.get(pk=northstar.pk)
+                barrier.wait(timeout=10)
+                results.append(run_billing(company=company, triggered_by=admin_user, period=MARCH))
+            except Exception as exc:  # surfaced in the main thread below
+                errors.append(exc)
+            finally:
+                connection.close()
 
-    def run():
-        try:
-            company = Company.objects.get(pk=northstar.pk)
-            barrier.wait(timeout=10)
-            results.append(run_billing(company=company, triggered_by=admin_user, period=MARCH))
-        except Exception as exc:  # surfaced in the main thread below
-            errors.append(exc)
-        finally:
-            connection.close()
+        # Not testing email here: stop the post-commit hook from sending.
+        with mock.patch('billing.services.send_deliveries'):
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
 
-    # Not testing email here: stop the post-commit hook from sending.
-    with mock.patch('billing.services.send_deliveries'):
-        threads = [threading.Thread(target=run) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=30)
-
-    assert errors == []
-    assert len(results) == 2
-    assert BillingRun.objects.filter(company=northstar, period=MARCH).count() == 2
-    assert Invoice.objects.filter(company=northstar, period=MARCH).count() == freelancer_count
-    assert sum(r.invoices_generated for r in results) == freelancer_count
-    assert sorted(r.invoices_existing for r in results) == [0, freelancer_count]
+        assert errors == []
+        assert len(results) == 2
+        assert BillingRun.objects.filter(company=northstar, period=MARCH).count() == 2
+        assert Invoice.objects.filter(company=northstar, period=MARCH).count() == freelancer_count
+        assert sum(r.invoices_generated for r in results) == freelancer_count
+        assert sorted(r.invoices_existing for r in results) == [0, freelancer_count]
