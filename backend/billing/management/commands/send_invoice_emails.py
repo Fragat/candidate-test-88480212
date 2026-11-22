@@ -2,6 +2,8 @@
 
 In production this would run on a schedule (e.g. cron).
 """
+from typing import Any
+
 from django.core.management.base import BaseCommand
 
 from billing.delivery import MAX_ATTEMPTS, count_needing_follow_up, process_outbox
@@ -13,7 +15,7 @@ class Command(BaseCommand):
         f'{MAX_ATTEMPTS} attempts), stopping at the first failed send.'
     )
 
-    def handle(self, *args: str, **options: str | int | bool | None) -> None:
+    def handle(self, *args: Any, **options: Any) -> None:
         summary = process_outbox()
         follow_up = count_needing_follow_up()
 

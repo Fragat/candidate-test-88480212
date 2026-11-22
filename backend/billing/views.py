@@ -53,7 +53,7 @@ class InvoiceViewSet(viewsets.ViewSet):
             invoices = invoices.filter(period=query.validated_data['month'])
         return Response(InvoiceSummarySerializer(invoices, many=True).data)
 
-    def retrieve(self, request: Request, pk: str | None = None) -> Response:
+    def retrieve(self, request: Request, pk: str) -> Response:
         """GET /api/invoices/<id>/ with lines and deliveries."""
         invoice = get_object_or_404(self.get_queryset().prefetch_related('lines'), pk=pk)
         return Response(InvoiceDetailSerializer(invoice).data)

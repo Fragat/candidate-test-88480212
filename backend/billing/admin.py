@@ -9,7 +9,7 @@ class ReadOnlyAdmin(admin.ModelAdmin):
     """Issued billing records are immutable; the admin is for inspection
     (e.g. finance checking failed deliveries), not editing."""
 
-    def has_add_permission(self, request: HttpRequest, obj: Model | None = None) -> bool:
+    def has_add_permission(self, request: HttpRequest) -> bool:
         return False
 
     def has_change_permission(self, request: HttpRequest, obj: Model | None = None) -> bool:
